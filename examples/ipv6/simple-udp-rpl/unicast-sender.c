@@ -97,6 +97,10 @@ PROCESS_THREAD(unicast_sender_process, ev, data)
 {
   static struct etimer periodic_timer;
   static struct etimer send_timer;
+  static char buf[190] =
+    "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\
+    012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+
   uip_ipaddr_t *addr;
 
   PROCESS_BEGIN();
@@ -119,14 +123,14 @@ PROCESS_THREAD(unicast_sender_process, ev, data)
     addr = servreg_hack_lookup(SERVICE_ID);
     if(addr != NULL) {
       static unsigned int message_number;
-      char buf[20];
+      //char buf[200] = dummy_string;
 
       printf("Sending unicast to ");
       uip_debug_ipaddr_print(addr);
       printf("\n");
-      sprintf(buf, "Message %d", message_number);
-      message_number++;
-      simple_udp_sendto(&unicast_connection, buf, strlen(buf) + 1, addr);
+      //sprintf(buf, "Message %d", message_number);
+      //message_number++;
+      simple_udp_sendto(&unicast_connection, buf, strlen(buf), addr);
     } else {
       printf("Service %d not found\n", SERVICE_ID);
     }

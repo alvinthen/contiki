@@ -71,7 +71,7 @@
 
 #include <stdio.h>
 
-#define DEBUG DEBUG_NONE
+#define DEBUG DEBUG_PRINT
 #include "net/uip-debug.h"
 #if DEBUG
 /* PRINTFI and PRINTFO are defined for input and output to debug one without changing the timing of the other */
@@ -215,6 +215,20 @@ static int last_tx_status;
 /** @} */
 
 #if SICSLOWPAN_CONF_FRAG
+#include "lib/list.h"
+#include "lib/memb.h"
+
+struct fragment {
+  struct fragmemt *next;
+  uint16_t frag_size;
+  uint8_t frag_processed_len;
+  uint16_t frag_tag;
+  uint8_t *payload;
+} *list_ptr;
+
+LIST(frag_list);
+MEMB(frag_list_mem, struct fragment, 127);
+
 /** \name Fragmentation related variables
  *  @{
  */
@@ -1604,10 +1618,10 @@ input(void)
 
 #if SICSLOWPAN_CONF_FRAG
   /* if reassembly timed out, cancel it */
-  if(timer_expired(&reass_timer)) {
+  /*if(timer_expired(&reass_timer)) {
     sicslowpan_len = 0;
     processed_ip_in_len = 0;
-  }
+  }*/
   /*
    * Since we don't support the mesh and broadcast header, the first header
    * we look for is the fragmentation header
@@ -1626,6 +1640,16 @@ input(void)
       /*      printf("frag1 %d %d\n", reass_tag, frag_tag);*/
       first_fragment = 1;
       is_fragment = 1;
+
+      for (list_ptr = list_head(frag_list);
+        list_ptr != NULL;
+        list_ptr = list_ptr->next);
+      list_ptr = memb_alloc(&frag_list_mem);
+      list_ptr->frag_size = frag_size;
+      list_ptr->frag_tag = frag_tag;
+      list_ptr->frag_processed_len = 0;
+      list_ptr->payload = malloc(frag_size);
+      list_add(frag_list, list_ptr);
       break;
     case SICSLOWPAN_DISPATCH_FRAGN:
       /*
@@ -1776,6 +1800,9 @@ input(void)
   }
 
   memcpy((uint8_t *)SICSLOWPAN_IP_BUF + uncomp_hdr_len + (uint16_t)(frag_offset << 3), rime_ptr + rime_hdr_len, rime_payload_len);
+
+  /* Copy to address pointed by the payload of currently processing fragment */
+  memcpy(list_ptr->payload, SICSLOWPAN_IP_BUF, list_ptr->frag_size);
   
   /* update processed_ip_in_len if fragment, sicslowpan_len otherwise */
 
@@ -1791,6 +1818,7 @@ input(void)
       processed_ip_in_len = frag_size;
     } else {
       processed_ip_in_len += rime_payload_len;
+      list_ptr->frag_processed_len += rime_payload_len;
     }
     PRINTF("processed_ip_in_len %d, rime_payload_len %d\n", processed_ip_in_len, rime_payload_len);
 
@@ -1810,6 +1838,14 @@ input(void)
     PRINTFI("sicslowpan input: IP packet ready (length %d)\n",
            sicslowpan_len);
     memcpy((uint8_t *)UIP_IP_BUF, (uint8_t *)SICSLOWPAN_IP_BUF, sicslowpan_len);
+    /* Copy address pointed by list_ptr->payload to UIP_IP_BUF */
+    memcpy((uint8_t *)UIP_IP_BUF, list_ptr->payload, list_ptr->frag_size);
+
+    /* Free up payload ptr and drop the fragment in list */
+    free(list_ptr->payload);
+    list_remove(frag_list, list_ptr);
+    memb_free(&frag_list_mem, list_ptr);
+
     uip_len = sicslowpan_len;
     sicslowpan_len = 0;
     processed_ip_in_len = 0;
@@ -1846,6 +1882,13 @@ input(void)
 void
 sicslowpan_init(void)
 {
+  /*
+   * Initialize Memory Block to store fragments.
+   * Initialize Linked List to track fragments.
+   */
+  list_init(frag_list);
+  memb_init(&frag_list_mem);
+
   /*
    * Set out output function as the function to be called from uIP to
    * send a packet.

@@ -223,6 +223,7 @@ struct fragment {
   uint16_t frag_size;
   uint8_t frag_processed_len;
   uint16_t frag_tag;
+  rimeaddr_t frag_sender;
   uint8_t *payload;
 } *list_ptr;
 
@@ -1641,6 +1642,7 @@ input(void)
       first_fragment = 1;
       is_fragment = 1;
 
+      /* Add current fragment into list */
       for (list_ptr = list_head(frag_list);
         list_ptr != NULL;
         list_ptr = list_ptr->next);
@@ -1649,6 +1651,7 @@ input(void)
       list_ptr->frag_tag = frag_tag;
       list_ptr->frag_processed_len = 0;
       list_ptr->payload = malloc(frag_size);
+      rimeaddr_copy(&(list_ptr->frag_sender), packetbuf_addr(PACKETBUF_ADDR_SENDER));
       list_add(frag_list, list_ptr);
       break;
     case SICSLOWPAN_DISPATCH_FRAGN:
@@ -1663,6 +1666,13 @@ input(void)
       PRINTFI("size %d, tag %d, offset %d)\n",
              frag_size, frag_tag, frag_offset);
       rime_hdr_len += SICSLOWPAN_FRAGN_HDR_LEN;
+
+      /* Get fragment from linked list based on its tag and sender*/
+      for(list_ptr = list_head(frag_list);
+        list_ptr != NULL && 
+        list_ptr->frag_tag != frag_tag &&
+        !rimeaddr_cmp(&(list_ptr->frag_sender), packetbuf_addr(PACKETBUF_ADDR_SENDER));
+        list_ptr = list_ptr->next);
 
       /* If this is the last fragment, we may shave off any extrenous
          bytes at the end. We must be liberal in what we accept. */
@@ -1686,7 +1696,7 @@ input(void)
    * We discard the previous packet, and start reassembling the new packet.
    * This lessens the negative impacts of too high SICSLOWPAN_REASS_MAXAGE.
    */
-#define PRIORITIZE_NEW_PACKETS 1
+#define PRIORITIZE_NEW_PACKETS 0
 #if PRIORITIZE_NEW_PACKETS
   if(processed_ip_in_len > 0 && first_fragment
       && !rimeaddr_cmp(&frag_sender, packetbuf_addr(PACKETBUF_ADDR_SENDER))) {

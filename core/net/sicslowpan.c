@@ -70,7 +70,6 @@
 #if UIP_CONF_IPV6
 
 #include <stdio.h>
-#include <stdlib.h>
 
 #define DEBUG DEBUG_PRINT
 #include "net/uip-debug.h"
@@ -229,7 +228,7 @@ struct fragment {
 } *list_ptr;
 
 LIST(frag_list);
-MEMB(frag_list_mem, struct fragment, 127);
+MEMB(frag_list_mem, struct fragment, 64);
 
 /** \name Fragmentation related variables
  *  @{
@@ -251,19 +250,19 @@ static uip_buf_t sicslowpan_aligned_buf;
  * length of the ip packet already sent / received.
  * It includes IP and transport headers.
  */
-//static uint16_t processed_ip_in_len;
+static uint16_t processed_ip_in_len;
 
 /** Datagram tag to be put in the fragments I send. */
 static uint16_t my_tag;
 
 /** When reassembling, the tag in the fragments being merged. */
-//static uint16_t reass_tag;
+static uint16_t reass_tag;
 
 /** When reassembling, the source address of the fragments being merged */
-//rimeaddr_t frag_sender;
+rimeaddr_t frag_sender;
 
 /** Reassembly %process %timer. */
-//static struct timer reass_timer;
+static struct timer reass_timer;
 
 /** @} */
 #else /* SICSLOWPAN_CONF_FRAG */
@@ -1681,12 +1680,14 @@ input(void)
         return;
       }
 
+      memcpy((uint8_t *)SICSLOWPAN_IP_BUF, list_ptr->payload, list_ptr->frag_size);
+
       /* If this is the last fragment, we may shave off any extrenous
          bytes at the end. We must be liberal in what we accept. */
       PRINTFI("last_fragment?: processed_ip_in_len %d rime_payload_len %d frag_size %d\n",
-              list_ptr->frag_processed_len, packetbuf_datalen() - rime_hdr_len, frag_size);
+              processed_ip_in_len, packetbuf_datalen() - rime_hdr_len, frag_size);
 
-      if(list_ptr->frag_processed_len + packetbuf_datalen() - rime_hdr_len >= frag_size) {
+      if(processed_ip_in_len + packetbuf_datalen() - rime_hdr_len >= frag_size) {
         last_fragment = 1;
       }
       is_fragment = 1;
@@ -1695,15 +1696,57 @@ input(void)
       break;
   }
 
-  /*
-   * reassembly is off
-   * start it if we received a fragment
+  /* We are currently reassembling a packet, but have just received the first
+   * fragment of another packet. We can either ignore it and hope to receive
+   * the rest of the under-reassembly packet fragments, or we can discard the
+   * previous packet altogether, and start reassembling the new packet.
+   *
+   * We discard the previous packet, and start reassembling the new packet.
+   * This lessens the negative impacts of too high SICSLOWPAN_REASS_MAXAGE.
    */
-  if((frag_size > 0) && (frag_size <= UIP_BUFSIZE)) {
-    sicslowpan_len = frag_size;
-    //timer_set(&reass_timer, SICSLOWPAN_REASS_MAXAGE * CLOCK_SECOND / 16);
-    PRINTFI("sicslowpan input: INIT FRAGMENTATION (len %d, tag %d)\n",
-           sicslowpan_len, frag_tag);
+#define PRIORITIZE_NEW_PACKETS 0
+#if PRIORITIZE_NEW_PACKETS
+  if(processed_ip_in_len > 0 && first_fragment
+      && !rimeaddr_cmp(&frag_sender, packetbuf_addr(PACKETBUF_ADDR_SENDER))) {
+    sicslowpan_len = 0;
+    processed_ip_in_len = 0;
+  }
+#endif /* PRIORITIZE_NEW_PACKETS */
+
+  if(processed_ip_in_len > 0) {
+    /* reassembly is ongoing */
+    /*    printf("frag %d %d\n", reass_tag, frag_tag);*/
+    if((frag_size > 0 &&
+        (frag_size != sicslowpan_len ||
+         reass_tag  != frag_tag ||
+         !rimeaddr_cmp(&frag_sender, packetbuf_addr(PACKETBUF_ADDR_SENDER))))  ||
+       frag_size == 0) {
+      /*
+       * the packet is a fragment that does not belong to the packet
+       * being reassembled or the packet is not a fragment.
+       */
+      /*PRINTFI("sicslowpan input: Dropping 6lowpan packet that is not a fragment of the packet currently being reassembled\n");
+      return;*/
+    }
+  } else {
+    /*
+     * reassembly is off
+     * start it if we received a fragment
+     */
+    if((frag_size > 0) && (frag_size <= UIP_BUFSIZE)) {
+      /* We are currently not reassembling a packet, but have received a packet fragment
+       * that is not the first one. */
+      if(is_fragment && !first_fragment) {
+        return;
+      }
+
+      sicslowpan_len = frag_size;
+      reass_tag = frag_tag;
+      //timer_set(&reass_timer, SICSLOWPAN_REASS_MAXAGE * CLOCK_SECOND / 16);
+      PRINTFI("sicslowpan input: INIT FRAGMENTATION (len %d, tag %d)\n",
+             sicslowpan_len, reass_tag);
+      rimeaddr_copy(&frag_sender, packetbuf_addr(PACKETBUF_ADDR_SENDER));
+    }
   }
 
   if(rime_hdr_len == SICSLOWPAN_FRAGN_HDR_LEN) {
@@ -1775,26 +1818,28 @@ input(void)
   }
 
   memcpy((uint8_t *)SICSLOWPAN_IP_BUF + uncomp_hdr_len + (uint16_t)(frag_offset << 3), rime_ptr + rime_hdr_len, rime_payload_len);
+
+  /* Copy to address pointed by the payload of currently processing fragment */
+  if(list_ptr != NULL)
+    memcpy(list_ptr->payload, (uint8_t *)SICSLOWPAN_IP_BUF, list_ptr->frag_size);
   
   /* update processed_ip_in_len if fragment, sicslowpan_len otherwise */
 
 #if SICSLOWPAN_CONF_FRAG
-  /* Copy to address pointed by the payload of currently processing fragment */
-  memcpy(list_ptr->payload, (uint8_t *)SICSLOWPAN_IP_BUF, list_ptr->frag_size);
   if(frag_size > 0) {
     /* Add the size of the header only for the first fragment. */
     if(first_fragment != 0) {
-      list_ptr->frag_processed_len += uncomp_hdr_len;
+      processed_ip_in_len += uncomp_hdr_len;
     }
     /* For the last fragment, we are OK if there is extrenous bytes at
        the end of the packet. */
     if(last_fragment != 0) {
-      list_ptr->frag_processed_len = frag_size;
+      processed_ip_in_len = frag_size;
     } else {
-      list_ptr->frag_processed_len += rime_payload_len;
+      processed_ip_in_len += rime_payload_len;
     }
-
-    PRINTF("processed_ip_in_len %d, rime_payload_len %d\n", list_ptr->frag_processed_len, rime_payload_len);
+    list_ptr->frag_processed_len = processed_ip_in_len;
+    PRINTF("processed_ip_in_len %d, rime_payload_len %d\n", processed_ip_in_len, rime_payload_len);
 
   } else {
 #endif /* SICSLOWPAN_CONF_FRAG */
@@ -1807,21 +1852,22 @@ input(void)
    * the IP stack
    */
   PRINTF("sicslowpan_init processed_ip_in_len %d, sicslowpan_len %d\n",
-         list_ptr->frag_processed_len, sicslowpan_len);
-  if(list_ptr->frag_processed_len == 0 || (list_ptr->frag_processed_len == sicslowpan_len)) {
+         processed_ip_in_len, sicslowpan_len);
+  if(processed_ip_in_len == 0 || (processed_ip_in_len == sicslowpan_len)) {
     PRINTFI("sicslowpan input: IP packet ready (length %d)\n",
            sicslowpan_len);
-    //memcpy((uint8_t *)UIP_IP_BUF, (uint8_t *)SICSLOWPAN_IP_BUF, sicslowpan_len);
-    /* Copy address pointed by list_ptr->payload to UIP_IP_BUF */
-    memcpy((uint8_t *)UIP_IP_BUF, list_ptr->payload, list_ptr->frag_size);
+    memcpy((uint8_t *)UIP_IP_BUF, (uint8_t *)SICSLOWPAN_IP_BUF, sicslowpan_len);
 
     /* Free up payload ptr and drop the fragment in list */
-    free(list_ptr->payload);
-    list_remove(frag_list, list_ptr);
-    memb_free(&frag_list_mem, list_ptr);
+    if(list_ptr != NULL) {
+      free(list_ptr->payload);
+      list_remove(frag_list, list_ptr);
+      memb_free(&frag_list_mem, list_ptr);
+    }
 
     uip_len = sicslowpan_len;
     sicslowpan_len = 0;
+    processed_ip_in_len = 0;
 #endif /* SICSLOWPAN_CONF_FRAG */
 
 #if DEBUG
